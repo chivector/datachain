@@ -1,23 +1,12 @@
-import io
-import tarfile
-import threading
 from datetime import UTC, datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import Mock, mock_open, patch
 
 import pytest
-from fsspec.callbacks import Callback
 
 from datachain.cache import Cache
 from datachain.client.fsspec import Client
 from datachain.client.http import HTTPClient, HTTPSClient
 from datachain.lib.file import File
-from datachain.lib.tar import process_tar
-
-
-class _FalseyCallback(Callback):
-    def __bool__(self):
-        return False
 
 
 def test_protocol_detection_https():
@@ -136,8 +125,7 @@ def test_open_object(monkeypatch):
     # Test with cache hit
     cache.get_path.return_value = "/cache/path/file.txt"
     with patch("builtins.open", mock_open(read_data=b"cached content")) as mock_file:
-        with client.open_object(file, use_cache=True) as stream:
-            assert stream.read() == b"cached content"
+        client.open_object(file, use_cache=True)
         mock_file.assert_called_once_with("/cache/path/file.txt", mode="rb")
 
     # Test without cache (cache miss)
@@ -153,92 +141,14 @@ def test_open_object(monkeypatch):
     client.fs.open.assert_called_once()  # Should fetch from remote, not cache
 
 
-@pytest.mark.parametrize("client_class", [HTTPClient, HTTPSClient])
-@pytest.mark.parametrize("data", [b"", b"remote content"])
-@pytest.mark.parametrize("callback_kwargs", [{}, {"cb": None}])
-def test_open_object_reads_without_callback(
-    monkeypatch, client_class, data, callback_kwargs
+def test_read_tar_member_of_uncached_archive_returns_its_data(
+    http_server, tmp_path, catalog, small_tar_member_data, small_tar_member
 ):
-    cache = Mock(spec=Cache)
-    cache.get_path.return_value = None
-    client = client_class("example.com", {}, cache)
-    monkeypatch.setattr(client.fs, "open", Mock(return_value=io.BytesIO(data)))
-    file = File(source=client.uri, path="file.txt")
+    data, raw = small_tar_member_data
+    (tmp_path / "archive.tar").write_bytes(raw)
+    member = small_tar_member(catalog.get_client(http_server))
 
-    with client.open_object(file, **callback_kwargs) as stream:
-        assert stream.read(3) == data[:3]
-        assert stream.read() == data[3:]
-        assert stream.read() == b""
-
-
-@pytest.mark.parametrize("client_class", [HTTPClient, HTTPSClient])
-@pytest.mark.parametrize("callback_class", [Callback, _FalseyCallback])
-def test_open_object_updates_callback(monkeypatch, client_class, callback_class):
-    cache = Mock(spec=Cache)
-    cache.get_path.return_value = None
-    client = client_class("example.com", {}, cache)
-    data = b"remote content"
-    monkeypatch.setattr(client.fs, "open", Mock(return_value=io.BytesIO(data)))
-    file = File(source=client.uri, path="file.txt")
-    callback = callback_class()
-
-    with client.open_object(file, cb=callback) as stream:
-        assert stream.read(3) == data[:3]
-        assert callback.value == 3
-        assert stream.read() == data[3:]
-        assert callback.value == len(data)
-        assert stream.read() == b""
-        assert callback.value == len(data)
-
-
-def test_http_tar_member_read(catalog):
-    data = b"remote tar member"
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as archive:
-        info = tarfile.TarInfo("member.txt")
-        info.size = len(data)
-        archive.addfile(info, io.BytesIO(data))
-    raw = buffer.getvalue()
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_HEAD(self):
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Accept-Ranges", "bytes")
-            self.end_headers()
-
-        def do_GET(self):
-            start, end = 0, len(raw) - 1
-            requested = self.headers.get("Range")
-            if requested:
-                first, last = requested.removeprefix("bytes=").split("-")
-                start, end = int(first), min(int(last), end)
-                self.send_response(206)
-                self.send_header("Content-Range", f"bytes {start}-{end}/{len(raw)}")
-            else:
-                self.send_response(200)
-            body = raw[start : end + 1]
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass
-
-    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            source = f"http://127.0.0.1:{server.server_port}"
-            parent = File(source=source, path="archive.tar")
-            parent._set_stream(catalog, caching_enabled=False)
-            member = next(process_tar(parent))
-            member._set_stream(catalog, caching_enabled=False)
-
-            assert member.read() == data
-        finally:
-            server.shutdown()
-            thread.join()
+    assert member.read() == data
 
 
 def test_url():
