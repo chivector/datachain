@@ -1481,7 +1481,7 @@ def fetched_bytes(monkeypatch):
     return fetched
 
 
-class _NoRangeHandler(http.server.SimpleHTTPRequestHandler):
+class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
@@ -1489,7 +1489,7 @@ class _NoRangeHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-class _RangeHandler(_NoRangeHandler):
+class _RangeHandler(_QuietHandler):
     def send_head(self):
         if not (ranges := self.headers.get("Range")):
             return super().send_head()
@@ -1525,4 +1525,4 @@ def http_server(tmp_path):
 @pytest.fixture
 def http_server_without_ranges(tmp_path):
     """Serve `tmp_path` over HTTP without range support; yields its base URL."""
-    yield from _serve(tmp_path, _NoRangeHandler)
+    yield from _serve(tmp_path, _QuietHandler)
